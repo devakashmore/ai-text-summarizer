@@ -1,7 +1,9 @@
-import express, { json } from "express";
+import express from "express";
 import dotenv from "dotenv"
 import cors from "cors"
 import { GoogleGenAI } from "@google/genai"
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 
 dotenv.config();
 
@@ -12,13 +14,40 @@ const PORT = process.env.PORT || 8000;
 const ai = new GoogleGenAI({
     apiKey: process.env.GEMINI_API_KEY
 })
+app.use(helmet());
 
-app.use(cors());
-app.use(express.json(
-    {
-        limit: "100kb"
-    }
-));
+// Allow only your frontend origins
+const allowedOrigins = [
+    "http://localhost:5173",
+    process.env.FRONTEND_URL,
+].filter(Boolean);
+// app.use(cors());
+app.use(
+    cors({
+        origin: (origin, callback) => {
+            // Permit requests without an Origin header, such as some
+            // server-to-server clients; this is not authentication.
+            if (!origin || allowedOrigins.includes(origin)) {
+                return callback(null, true);
+            }
+
+            return callback(new Error("Origin not allowed"));
+        },
+    })
+);
+
+app.use(express.json({ limit: "20kb" }));
+
+const summarizeLimiter = rateLimit({
+    windowMs: 60 * 1000, // 60 seconds
+    limit: 5,            // 5 requests per IP per window
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: {
+        error: "Too many requests. Please try again after 60 seconds.",
+    },
+});
+
 
 app.get("/", function (req, res) {
     res.json({
@@ -27,9 +56,9 @@ app.get("/", function (req, res) {
 })
 
 
-app.post("/api/summarize", async (req, res) => {
+app.post("/api/summarize", summarizeLimiter, async (req, res) => {
     try {
-        const { text, length = "short" } = req.body;
+        const { text, length = "short" } = req.body ?? {};
         if (typeof text != "string" || !text.trim()) {
             return res.status(400).json({
                 error: "please provide text to summarize. "
@@ -47,7 +76,13 @@ app.post("/api/summarize", async (req, res) => {
             detailed: "as a detailed summary with key points",
         }
 
-        const instruction = summaryLength[length] || summaryLength.short;
+        if (!["short", "medium", "detailed"].includes(length)) {
+            return res.status(400).json({
+                error: "Invalid summary length.",
+            });
+        }
+        // const instruction = summaryLength[length] || summaryLength.short;
+        const instruction = summaryLength[length];
 
         const response = await ai.models.generateContent({
             model: "gemini-3.8-flash",
@@ -62,7 +97,7 @@ app.post("/api/summarize", async (req, res) => {
         const summary = response.text;
 
         // console.log(summary);
-        
+
         if (!summary) {
             return res.status(502).json({
                 error: "The AI did not return a summary. Please try again.",
